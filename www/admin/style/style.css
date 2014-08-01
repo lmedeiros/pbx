@@ -1,0 +1,36 @@
+a { text-decoration: none; }
+ul { list-style: none; }
+
+
+/* 
+        LEVEL ONE
+*/
+ul.dropdown                         { position: relative; margin-top: 8px;}
+ul.dropdown li                      { font-weight: bold; float: left; padding-bottom: 5px;}
+ul.dropdown a:hover		    { color: white; }
+ul.dropdown li a                    { display: block;text-decoration: none;  padding: 4px 12px; color: white;  font-weight: normal; font-size: 16px;}
+ul.dropdown li:last-child a         { border-right: none; } /* Doesn't work in IE */
+ul.dropdown li.hover,
+ul.dropdown li:hover                { background: #CCC; color: white; position: relative; }
+ul.dropdown li.hover a              { color: #222; text-decoration: none;}
+ul.sub_menu li.hover a:hover        { font-size: 12px; text-decoration: none; }
+ul.sub_menu li a                    { font-size: 12px; text-decoration: none;}
+
+/* 
+        LEVEL TWO
+*/
+ul.dropdown ul 			    { width: 240px; visibility: hidden; position: absolute; top: 100%; left: 0; }
+ul.sub_menu ul li 		    { float: left; font-size: 14px; font-weight: normal; background: #333; color: white; float: none; }
+ul.dropdown ul li 		    { font-size: 12px; font-weight: normal; background: #BBB; color: #000; float: none; }
+ul.dropdown ul li a:hover	    { color: #222; text-decoration: none;}
+ul.sub_menu ul li a		    { color: white; font-size: 14px; text-decoration: none;}
+
+/* IE 6 & 7 Needs Inline Block */
+ul.dropdown ul li a					{ text-decoration: none; border-right: none; color: white; width: 100%; display: inline-block; } 
+
+
+/* 
+        LEVEL THREE
+*/
+ul.dropdown ul ul 					{ left: 100%; top: 0; }
+ul.dropdown li:hover > ul 			{ visibility: visible; }

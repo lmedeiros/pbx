@@ -1,0 +1,64 @@
+.filter_cdr td {
+    border: none;
+    padding: 4px 4px 4px 4px;
+}
+
+.list table {
+    width: 100%;
+    border-collapse:collapse;
+    margin-top: 20px;
+}
+
+.list p {
+    font-size: 14px;
+    padding-bottom: 15px;
+}
+
+.list a:hover {
+    text-decoration: underline;
+}
+
+.list thead th {
+    height: 35px;
+    background-color: #666;
+    font-size: 14px;
+    font-weight: normal;
+    color: #FFFFFF;
+    text-align: center;
+    border-right: 1px solid #888;
+}
+
+.list tbody tr.over * {
+    background-color: #FF6600;
+    color: #FFFFFF;
+}
+
+.list tbody tr.odd {
+    background-color: #efefef;
+}
+
+.list input, select {
+    font-size: 11px;
+}
+
+.list tbody th,td {
+    font-size: 12px;
+    line-height: 1.1em;
+    color: #555555;
+    padding: 8px 8px;
+    text-align: left;
+}
+
+.list tfoot tr {
+    font-size: 12px;
+    background-color: #cdcdcd;
+    color: #555555;
+    height: 20px;
+}
+
+.list tfoot td {
+    font-size: 11px;
+    color: #555555;
+    height: 20px;
+    
+}

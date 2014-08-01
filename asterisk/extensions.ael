@@ -1,0 +1,850 @@
+globals {
+	//Mysql Options
+	MYSQL-SERVER=127.0.0.1;
+	MYSQL-USER=pbx;
+	MYSQL-PASSWORD=othos68467;
+	MYSQL-DB=pbx;
+
+	COUNTRY-CODE=55;
+};
+
+macro peer_has_permission(peer_id,route_id) {
+	peer_id=${FILTER(0-9,${peer_id})};
+	route_id=${FILTER(0-9,${route_id})};
+
+	//Verbose(2,[${CHANNEL}] - Verificando permissão de discagem do ramal: ${peer_id} pela rota ID: ${route_id});	
+
+
+	MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+	query="SELECT count(is_allowed) FROM pbx_route_permission A INNER JOIN pbx_campaign_route C ON C.pbx_campaign_id = ${CDR(campaign)} WHERE C.is_allow=1 AND C.pbx_route_outgoing_id = ${route_id} AND pbx_peer_sip_id='${peer_id}' AND code='${route_id}' AND is_allowed='1' LIMIT 1";
+
+	MYSQL(Query queryid ${connid} ${query});
+	MYSQL(Fetch resultid ${queryid} permission);
+	MYSQL(Clear ${queryid});
+	MYSQL(Disconnect ${connid});
+	
+	if('${permission}'=='') {
+                playback(access-denied);
+                Hangup();
+        };
+
+        if('${permission}'=='0') {
+                playback(access-denied);
+                Hangup();
+        };
+	
+	Return(${permission});
+	return;
+};
+
+macro agent_has_permission(agent_id,route_id) {
+        agent_id=${FILTER(0-9,${agent_id})};
+        route_id=${FILTER(0-9,${route_id})};
+
+        //Verbose(2,[${CHANNEL}] - Verificando permissão de discagem do agente: ${agent_id} pela rota ID: ${route_id});
+
+
+        MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+        query="SELECT count(is_allowed) FROM pbx_agent_permission INNER JOIN pbx_campaign_route C ON C.pbx_campaign_id = ${CDR(campaign)} WHERE C.is_allow=1 AND C.pbx_route_outgoing_id = ${route_id} AND pbx_locker_id='${agent_id}' AND code='${route_id}' AND is_allowed='1' LIMIT 1";
+
+        MYSQL(Query queryid ${connid} ${query});
+        MYSQL(Fetch resultid ${queryid} permission);
+        MYSQL(Clear ${queryid});
+        MYSQL(Disconnect ${connid});
+
+        if('${permission}'=='') {
+                playback(access-denied);
+                Hangup();
+        };
+
+        if('${permission}'=='0') {
+                playback(access-denied);
+                Hangup();
+        };
+
+        Return(${permission});
+        return;
+};
+
+macro get_routeid(number,peer_id) {
+
+        //Verbose(2,[${CHANNEL}] - Procurando rota disponível para o número: ${number} ##);
+
+	MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+	
+	query_route="SELECT DISTINCT pbx_route_outgoing_id, pbx_route_level FROM pbx_route_outgoing WHERE '${number}' REGEXP pattern AND pbx_route_level = (SELECT MAX(pbx_route_level) FROM pbx_route_outgoing WHERE '${number}' REGEXP pattern)";
+		
+        MYSQL(Query queryid ${connid} ${query_route});
+        MYSQL(Fetch resultid ${queryid} route_id level);
+        MYSQL(Clear ${queryid});
+        MYSQL(Disconnect ${connid});
+	
+	if('${route_id}'=='') {
+		SET(CDR(location)=Localidade Desconhecida);
+		Playback(no-route-exists-to-dest);
+		Verbose(2,${SHELL(echo -n \\033\[0\;31m)}ERRO - Não foi encontrado nenhuma rota para o número: ${number}${SHELL(echo -n \\033\[0\;37m)});
+		Hangup();
+	};
+
+	//Verbose(2,00.locker -> CHECKING LOCKER AT ${peer_id} EXTENSION ##);
+	&locker(${peer_id});
+
+	//INTERNAL ROUTE DIAL STRAIGHT
+	if('${level}'=='1000') {
+		&dial_int(${peer_id}, ${number});
+	};
+
+	Return(${route_id});
+	return;
+};
+
+macro dial_int(peer_id, number) {
+	peer_id=${FILTER(0-9,${peer_id})};
+	number=${FILTER(0-9,${number})};
+	
+	Verbose(2,[${CHANNEL}] - Chamada entre ramais de: ${peer_id} para: ${number} ##);
+        SET(CDR(location)=Rede Othos);
+        Set(CDR(trunkname)=Interno);
+	&follow_me(${peer_id}, ${number});
+        Dial(SIP/${number},45,tTkK);
+        VoiceMail(${number}@global);
+        Playback(invalid);
+        Hangup();
+        return;
+};
+
+
+macro dial_incoming(peer_id, number, exten) {
+        peer_id=${FILTER(0-9,${peer_id})};
+        number=${FILTER(a-zA-Z0-9#,${number})};
+	exten=${FILTER(a-zA-Z0-9#,${exten})};
+
+        Verbose(2,[${CHANNEL}] - Chamada entrante ${peer_id} para: ${number} ##);
+      
+	if('${exten}'!='0') {	
+		SET(CDR(location)=Entrante);
+        	SET(CDR(trunkname)=${exten});
+	}        
+
+	if('${number:0:3}'=='ivr') {
+		goto ivr|${FILTER(0-9,${number})}|1;
+	};
+
+        if('${number:0:3}'=='que') {
+                goto incoming|${FILTER(0-9,${number})}|1;
+        };
+
+	&follow_me(${peer_id}, ${number});
+        Dial(SIP/${number},45,tTkK);
+        VoiceMail(${number}@global);
+        Playback(invalid);
+        Hangup();
+        return;
+};
+
+macro get_dialstring_bkp(number,peer_id) {
+
+	MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+	
+	query_route="SELECT DISTINCT pbx_trunk_backup, IFNULL(remove_left_bkp,0) as remove_left , IFNULL(prefix_bkp,'') as prefix FROM pbx_route_outgoing WHERE '${number}' REGEXP pattern AND pattern = (SELECT MAX(pattern) FROM pbx_route_outgoing WHERE '${number}' REGEXP pattern)";
+		
+        MYSQL(Query queryid ${connid} ${query_route});
+        MYSQL(Fetch resultid ${queryid} trunk remove_left prefix);
+        MYSQL(Clear ${queryid});
+        MYSQL(Disconnect ${connid});
+	
+	if('${route_id}'=='') {
+                Verbose(2,[${CHANNEL}] - ${SHELL(echo -n \\033\[0\;31m)}ERRO - Não foi encontrado nenhuma rota para o número: ${number}${SHELL(echo -n \\033\[0\;37m)});
+		SET(CDR(location)='Localidade Desconhecida');
+		Playback(no-route-exists-to-dest);
+		Hangup();
+	};
+		
+        //Verbose(2,[${CHANNEL}] - Formato de discagem backup é: "SIP/${prefix}${number:${remove_left}}@${trunk}" ##);
+
+	Set(CDR(pbx_trunk_bkp)=${trunk});
+	Return("SIP/${prefix}${number:${remove_left}}@${trunk}");
+	return;
+};
+
+macro get_dialstring(number,peer_id) {
+
+	MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+	
+	query_route="SELECT DISTINCT pbx_peer_sip_id, IFNULL(remove_left,0) as remove_left , IFNULL(prefix,'') as prefix FROM pbx_route_outgoing WHERE '${number}' REGEXP pattern AND pattern = (SELECT MAX(pattern) FROM pbx_route_outgoing WHERE '${number}' REGEXP pattern)";
+		
+        MYSQL(Query queryid ${connid} ${query_route});
+        MYSQL(Fetch resultid ${queryid} trunk remove_left prefix);
+        MYSQL(Clear ${queryid});
+        MYSQL(Disconnect ${connid});
+	
+	if('${route_id}'=='') {
+                Verbose(2,[${CHANNEL}] - ${SHELL(echo -n \\033\[0\;31m)}ERRO - Não foi encontrado nenhuma rota para o número: ${number} ${SHELL(echo -n \\033\[0\;37m)});
+
+		SET(CDR(location)='Localidade Desconhecida');
+		Playback(no-route-exists-to-dest);
+		Hangup();
+	};
+	
+        //Verbose(2,[${CHANNEL}] - Formato de discagem padrão é: "SIP/${prefix}${number:${remove_left}}@${trunk}" ##);
+		
+	Set(CDR(trunkname)=${trunk});
+	Return("SIP/${prefix}${number:${remove_left}}@${trunk}");
+	return;
+};
+
+
+macro get_rate(peer_id, number, route_id) {
+        //Verbose(2,[${CHANNEL}] - Calculando tarifa da chamada para: ${number} ##);
+
+	number=${FILTER(0-9#,${number})};
+	route_id=${FILTER(0-9,${route_id})};
+
+	MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+        query_route="SELECT DISTINCT pbx_peer_sip_id, IFNULL(remove_left,0) as remove_left , IFNULL(prefix,'') as prefix FROM pbx_route_outgoing WHERE '${number}' REGEXP pattern AND pattern = (SELECT MAX(pattern) FROM pbx_route_outgoing WHERE '${number}' REGEXP pattern)";
+
+        MYSQL(Query queryid ${connid} ${query_route});
+        MYSQL(Fetch resultid ${queryid} trunk remove_left prefix);
+        MYSQL(Clear ${queryid});
+        MYSQL(Disconnect ${connid});
+
+        if('${route_id}'=='') {
+                Verbose(2,[${CHANNEL}] - ${SHELL(echo -n \\033\[0\;31m)}ERRO - Nenhuma rota foi encontrada para o número: ${number}${SHELL(echo -n \\033\[0\;37m)});
+
+                SET(CDR(location)='Localidade Desconhecida');
+                Playback(no-route-exists-to-dest);
+                Hangup();
+        };
+
+        //Verbose(2,[${CHANNEL}] - DIAL STRING IS "SIP/${prefix}${number:${remove_left}}@${trunk}" ##);
+
+	prefix=${FILTER(0-9,${prefix})};
+	remove_left=${FILTER(0-9,${remove_left})};
+
+        if(${remove_left}!='') {
+                number = ${number:${remove_left}};
+		if(${LEN(${number})}==10 && '${number:0:4}'!='0800') {
+			number = 0${number};
+		};
+		if('${number:0:3}'=='119' && '${number:0:4}'!='0800') {
+                        number = 0${number};
+                };
+
+
+        };
+
+	if('${number:0:2}'=='00') {
+
+		number=${number:2};
+	
+	} else if('${number:0:1}'=='0' && '${number:0:4}'!='0800' && '${number:0:4}'!='0300') {
+
+                number = ${COUNTRY-CODE}${number:1};
+
+	};
+ 
+	MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+	query_rate="SELECT rate, description FROM pbx_rate WHERE pattern =(SELECT MAX(A.pattern) FROM (SELECT IFNULL(rate,0.0000) as rate, description, pattern FROM (SELECT rate, description, pattern FROM pbx_rate WHERE '${number}' RLIKE pattern AND pattern REGEXP '^${number:0:2}')B) A)";
+
+        MYSQL(Query queryid ${connid} ${query_rate});
+        MYSQL(Fetch resultid ${queryid} rate description);
+        MYSQL(Clear ${queryid});
+        MYSQL(Disconnect ${connid});
+        Verbose(2,[${CHANNEL}] - A tarifa para o número ${number} é ${rate}, para a localidade ${description} ##);
+
+	if('${rate}'=='') {
+		SET(CDR(location)='Localidade Desconhecida');
+		playback(no-route-exists-to-dest);
+                Hangup();
+        };
+
+	Set(CDR(location)=${description});
+
+	MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+	query_multiplier="SELECT IFNULL(SUM(M.multiplier),1.0000) as multiplier FROM pbx_rate_group_account A, pbx_rate_group M WHERE A.pbx_account_id='${CDR(campaign)}' AND A.pbx_rate_group_id = M.pbx_rate_group_id AND A.pbx_route_outgoing_id='${FILTER(0-9,${route_id})}'";
+
+        MYSQL(Query queryid ${connid} ${query_multiplier});
+        MYSQL(Fetch resultid ${queryid} multiplier);
+        MYSQL(Clear ${queryid});
+        MYSQL(Disconnect ${connid});
+        //Verbose(2,[${CHANNEL}] - Multiplicador de tarifa para o ramal ${peer_id} é: ${multiplier} ##);
+
+	rate=(${rate}*${multiplier});
+
+        if('${rate}'=='') {
+	
+        	Verbose(2,[${CHANNEL}] - ${SHELL(echo -n \\033\[0\;31m)}ERRO -> Não foi possível encontrar a localidade do número ${number} ${SHELL(echo -n \\033\[0\;37m)});
+		SET(CDR(location)='Localidade Desconhecida');
+		playback(access-denied);
+                Hangup();
+        };
+	
+	Return(${rate});
+	return;
+};
+
+
+macro dial(peer_id, number, route_id) {
+	
+	//Verbose(2, [${CHANNEL}] - CHAMADA SAÍNTE: Ramal ${peer_id} para ${number});
+
+	&peer_has_permission(${peer_id}, ${route_id});
+	&agent_has_permission(${CDR(locker)}, ${route_id});
+
+	&get_rate(${peer_id}, ${number}, ${route_id});
+        rate=${GOSUB_RETVAL};
+        Set(CDR(rate)=${rate});
+	
+        
+        //Verbose(2,[${CHANNEL}] - ALL GOOD TO GO FOR: Peer ${peer_id} To ${number} Route ${route_id} ##);
+
+	return;
+};
+
+macro set_call_cost(billsec, rate, peer_id) {
+	rate_30=${rate}/2;
+	rate_60=${rate};
+	rate_6=${rate}/10;
+
+	
+	//POSTPAID BILLING
+	if(${billsec} <= 6) {
+		Verbose(2,[${CHANNEL}] - Chamada não tarifada duração 0 segundos);
+		Return(0.0000);
+	};
+
+	if(${billsec} < 30 & ${billsec} > 6 ) {
+		Verbose(2,[${CHANNEL}] - Chamada tarifada pós-pago duração <30 segundos);
+		Return(${rate_30});
+	};
+
+	if(${billsec} > 30 ) {
+		//INTERNATIONAL POSTPAID
+		if('${CDR(dst):0:2}'=='00') {
+			bs=(${billsec}-30)/30;
+               	        billsec_30=CEIL(${bs});
+       	                cc=${rate_30}*${billsec_30};
+                        cost=${cc};
+			Verbose(2,[${CHANNEL}] - Chamada tarifada internacional pós-pago 30/30);
+                       	Return(${cost});			
+		};
+		//NATIONAL POSTPAID
+		bs=(${billsec}-30)/6;
+		billsec_6=CEIL(${bs});
+		cc=${rate_6}*${billsec_6};
+		cost=${cc}+${rate_30};
+		Verbose(2,[${CHANNEL}] - Chamada tarifada nacional pós-pago 30/6/6);
+		Return(${cost});
+	};
+	return;
+};
+
+macro follow_me(peer_id,number) {
+
+	peer_id=${FILTER(0-9,${peer_id})};
+	number=${FILTER(0-9,${number})};
+
+	MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+        query_forward="SELECT forward, ifnull(forward_to,'') as forward_to FROM pbx_peer_sip WHERE id='${number}'";
+
+        MYSQL(Query queryid ${connid} ${query_forward});
+        MYSQL(Fetch resultid ${queryid} forward forward_to);
+        MYSQL(Clear ${queryid});
+        MYSQL(Disconnect ${connid});
+
+        if('${forward}'=='yes') {
+                if('${forward_to}'!='') {
+                        Verbose(2,[${CHANNEL}] - FORWARD CALL FROM ${number} TO ${forward_to} FOR ${peer_id} ##);
+
+        		SET(CDR(accountcode)=${number:1});
+			goto global|${forward_to}|1;
+                };
+        };
+        return;
+};
+
+macro locker(peer_id) {
+
+	MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+        query_islogged="SELECT count(CA.pbx_locker_id), CA.pbx_locker_id, CA.pbx_campaign_id FROM pbx_campaign_agent CA INNER JOIN pbx_campaign C ON C.pbx_campaign_id = CA.pbx_campaign_id WHERE CA.pbx_peer_id = '${CALLERID(num)}' AND CA.is_logged=1 AND NOW() BETWEEN C.start_date AND C.end_date LIMIT 1";
+
+        MYSQL(Query queryid ${connid} ${query_islogged});
+        MYSQL(Fetch resultid ${queryid} is_logged agent_id campaign_id);
+        MYSQL(Clear ${queryid});
+        MYSQL(Disconnect ${connid});
+
+        if('${is_logged}'=='1') {
+		CDR(campaign)=${campaign_id};
+		CDR(locker)=${agent_id};
+		return;
+	};
+
+	playback(access-denied);
+	Playback(agent-loggedoff);
+	Hangup();
+	return;
+};
+
+macro monitor(number, peer_id) {
+
+	peer_id=${peer_id:1};
+
+	MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+        query_monitor="SELECT monitor FROM pbx_peer_sip WHERE id = '${peer_id}' LIMIT 1";
+
+        MYSQL(Query queryid ${connid} ${query_monitor});
+        MYSQL(Fetch resultid ${queryid} mon);
+        MYSQL(Clear ${queryid});
+        MYSQL(Disconnect ${connid});
+
+        if('${mon}'=='1') {
+                Verbose(2,[${CHANNEL}] - RECORDING AT ${peer_id}-${STRFTIME(${EPOCH},,%Y%m%d-%H%M%S)}-TO-${number}.wav ##);
+
+		MixMonitor(${peer_id}-${STRFTIME(${EPOCH},,%Y%m%d-%H%M%S)}-TO-${number}.wav,w3);
+	};
+	return;
+};
+
+context global {
+	includes { parkedcalls; };	
+	
+	//GLOBAL DIAL AUTO ROUTE SYSTEM
+	_X. => {
+	 	Verbose(2, );
+		Verbose(2,[${CHANNEL}] - ${SHELL(echo -n \\033\[0\;32m)}INICIANDO CHAMADA - RAMAL ${SHELL(echo -n \\033\[0\;36m)}${CDR(accountcode)}${SHELL(echo -n \\033\[0\;32m)} PARA ${SHELL(echo -n \\033\[0\;36m)}${EXTEN}${SHELL(echo -n \\033\[0\;37m)});	
+		Set(fromext=${CDR(accountcode)});
+		//Verbose(2,${CALLERID(num)});
+		&get_routeid(${EXTEN}, ${fromext});
+                route_id=${GOSUB_RETVAL};
+		
+		&dial(${fromext}, ${EXTEN}, ${route_id});
+		
+		&get_dialstring(${EXTEN}, ${fromext});
+		dialstring=${GOSUB_RETVAL};
+
+		&monitor(${EXTEN}, ${fromext});
+
+                Verbose(2,[${CHANNEL}] - ${SHELL(echo -n \\033\[0\;36m)}DISCANDO TRONCO PADRÃO, ROTA ID: ${route_id} - ${SHELL(echo -n \\033\[0\;33m)}${dialstring}${SHELL(echo -n \\033\[0\;37m)});
+
+		Dial(${dialstring},45,tTwWkK);
+	
+		&get_dialstring_bkp(${EXTEN}, ${fromext});
+		dialstring_bkp=${GOSUB_RETVAL};
+
+                Verbose(2,[${CHANNEL}] - ${SHELL(echo -n \\033\[0\;31m)}DISCANDO TRONCO BACKUP, ROTA ID: ${route_id} - ${SHELL(echo -n \\033\[0\;33m)}${dialstring_bkp}${SHELL(echo -n \\033\[0\;37m)});
+	
+		Dial(${dialstring_bkp},45,tTwWkK);
+		Hangup();
+	};
+
+	//VOICEMAIL
+        *100 => {
+                Verbose(2,[${CHANNEL}] - VOICEMAIL ON: ${CDR(accountcode)});
+                Set(CDR(location)=Correio de Voz);
+		Set(CDR(trunkname)=Interno);
+		Voicemailmain(${CDR(accountcode)}@global,s);
+                Hangup();
+        };
+
+
+	//NUMBER INFO
+	*102 => {
+		Verbose(2,[${CHANNEL}] - ACC NUMBER ON: ${CDR(accountcode)});
+		Set(CDR(trunkname)=Interno);
+		Set(CDR(location)=Info. Ramal);
+        	Playback(your);        
+		Playback(number);
+		Playback(is);
+                SayDigits(${CDR(accountcode)});
+                Hangup();
+        }
+
+	*550 => {
+                MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+                query_logout="SELECT count(pbx_peer_id), pbx_locker_id, pbx_campaign_id FROM pbx_campaign_agent WHERE pbx_peer_id = '${CALLERID(num)}' AND is_logged=1 LIMIT 1";
+
+                MYSQL(Query queryid ${connid} ${query_logout});
+                MYSQL(Fetch resultid ${queryid} is_logged agent_id campaign_id);
+                MYSQL(Clear ${queryid});
+                MYSQL(Disconnect ${connid});
+
+                if('${is_logged}'=='1') {
+			Set(MemberChannel=${CHANNEL(channeltype)}/${CHANNEL(peername)});
+        	        PauseQueueMember(,${MemberChannel});
+		
+			MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+	                query_log="INSERT INTO pbx_agent_log SET event = 3, pbx_locker_id = '${agent_id}', pbx_peer_id = '${CALLERID(num)}', pbx_campaign_id = '${campaign_id}'";
+                        MYSQL(Query queryid ${connid} ${query_log});
+		};
+		Hangup();	
+	};
+
+	*551 => {
+		MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+                query_logout="SELECT count(pbx_peer_id), pbx_locker_id, pbx_campaign_id FROM pbx_campaign_agent WHERE pbx_peer_id = '${CALLERID(num)}' AND is_logged=1 LIMIT 1";
+
+                MYSQL(Query queryid ${connid} ${query_logout});
+                MYSQL(Fetch resultid ${queryid} is_logged agent_id campaign_id);
+                MYSQL(Clear ${queryid});
+                MYSQL(Disconnect ${connid});
+
+                if('${is_logged}'=='1') {
+        	        Set(MemberChannel=${CHANNEL(channeltype)}/${CHANNEL(peername)});
+	                UnPauseQueueMember(,${MemberChannel});
+
+			MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+			query_log="INSERT INTO pbx_agent_log SET event = 4, pbx_locker_id = '${agent_id}', pbx_peer_id = '${CALLERID(num)}', pbx_campaign_id = '${campaign_id}'";
+                        MYSQL(Query queryid ${connid} ${query_log});
+		};
+		Hangup();
+	};
+
+
+	//CAMPAIGN AGENT LOGOUT
+	_*550[5-7]XXX => {
+		MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+	        query_logout="SELECT count(pbx_locker_id), pbx_campaign_agent_id, pbx_campaign_id FROM pbx_campaign_agent WHERE pbx_locker_id = '${EXTEN:4}' AND pbx_peer_id = '${CALLERID(num)}' AND is_logged=1 LIMIT 1";
+
+	        MYSQL(Query queryid ${connid} ${query_logout});
+        	MYSQL(Fetch resultid ${queryid} is_logged acp_id campaign_id);
+       		MYSQL(Clear ${queryid});
+       		MYSQL(Disconnect ${connid});
+
+	        if('${is_logged}'=='1') {
+        	        Verbose(2,[${CHANNEL}] - AGENTE ${EXTEN:4} ESTA LOGADO, DIGITE A SENHA PARA DESLOGAR... ##);
+                	Read(password,agent-pass,6);
+               		if('${password}'!='') {
+
+                        	MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+	                        query_locker="SELECT count(pbx_locker_id) FROM pbx_locker WHERE pbx_locker_id = '${EXTEN:4}' AND is_active = '1' AND secret = '${password}' LIMIT 1";
+
+	                        MYSQL(Query queryid ${connid} ${query_locker});
+        	                MYSQL(Fetch resultid ${queryid} locker_found);
+                	        MYSQL(Clear ${queryid});
+                        	MYSQL(Disconnect ${connid});
+
+                        	if('${locker_found}'=='0') {
+                                	Playback(access-denied);
+                                	Hangup();
+                       		} else {
+                        	       	MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+	                                query_exit="UPDATE pbx_campaign_agent SET is_logged = 0, pbx_peer_id = '' WHERE pbx_campaign_agent_id = '${acp_id}'";
+                	                MYSQL(Query queryid ${connid} ${query_exit});
+					
+					query_log="INSERT INTO pbx_agent_log SET event = 0, pbx_locker_id = '${EXTEN:4}', pbx_peer_id = '${CALLERID(num)}', pbx_campaign_id = '${campaign_id}'";
+                                        MYSQL(Query queryid ${connid} ${query_log});
+
+                                        Set(MemberChannel=${CHANNEL(channeltype)}/${CHANNEL(peername)});
+                                        RemoveQueueMember(${campaign_id},${MemberChannel});
+	
+    					Playback(agent-loggedoff);
+                        		Hangup();
+
+                       		};
+	           	} else {
+				Playback(access-denied);
+	                        Hangup();
+			};
+        	} else {
+			Playback(access-denied);
+			Hangup();
+		};
+		
+	};
+
+	 //CAMPAIGN AGENT LOGIN
+        _*551[7-9]XXX => {
+            
+		MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+                query_peer="SELECT count(CP.pbx_peer_id) FROM pbx_campaign_peer CP WHERE CP.pbx_peer_id = '${CALLERID(num)}' AND CP.pbx_campaign_id = '${EXTEN:4}' LIMIT 1";
+
+                MYSQL(Query queryid ${connid} ${query_peer});
+                MYSQL(Fetch resultid ${queryid} is_peer);
+                MYSQL(Clear ${queryid});
+                MYSQL(Disconnect ${connid});
+
+                if('${is_peer}'=='0') {
+			Playback(access-denied);
+			Hangup();
+		};
+
+                MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+                query_peer="SELECT count(CA.pbx_peer_id) FROM pbx_campaign_agent CA WHERE CA.pbx_peer_id = '${CALLERID(num)}' AND is_logged = '1' LIMIT 1";
+
+                MYSQL(Query queryid ${connid} ${query_peer});
+                MYSQL(Fetch resultid ${queryid} is_in);
+                MYSQL(Clear ${queryid});
+                MYSQL(Disconnect ${connid});
+
+                if('${is_in}'=='1') {
+                        Playback(access-denied);
+                        Hangup();
+                };
+
+		Read(login,agent-user,4);
+ 
+		MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+                query_login="SELECT count(CA.pbx_locker_id), CA.pbx_campaign_agent_id, CA.pbx_campaign_id, C.type FROM pbx_campaign_agent CA INNER JOIN pbx_campaign C ON C.pbx_campaign_id = CA.pbx_campaign_id WHERE CA.pbx_locker_id = '${login}' AND CA.pbx_campaign_id = '${EXTEN:4}' AND CA.is_logged=0 AND NOW() BETWEEN C.start_date AND C.end_date LIMIT 1";
+
+                MYSQL(Query queryid ${connid} ${query_login});
+                MYSQL(Fetch resultid ${queryid} is_logged ca_id campaign_id type);
+                MYSQL(Clear ${queryid});
+                MYSQL(Disconnect ${connid});
+
+                if('${is_logged}'=='1') {
+                        Verbose(2,[${CHANNEL}] - AGENTE ${login} ESTA DESLOGADO, DIGITE A SENHA PARA LOGAR... ##);
+                        Read(password,agent-pass,6);
+                        if('${password}'!='') {
+
+                                MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+                                query_locker="SELECT count(pbx_locker_id) FROM pbx_locker WHERE pbx_locker_id = '${login}' AND is_active = '1' AND secret = '${password}' LIMIT 1";
+
+                                MYSQL(Query queryid ${connid} ${query_locker});
+                                MYSQL(Fetch resultid ${queryid} locker_found);
+                                MYSQL(Clear ${queryid});
+                                MYSQL(Disconnect ${connid});
+
+                                if('${locker_found}'=='0') {
+                                        Playback(access-denied);
+                                        Hangup();
+                                } else {
+					if('${type}'=='2') {
+						Set(MemberChannel=${CHANNEL(channeltype)}/${CHANNEL(peername)});
+						AddQueueMember(${EXTEN:4},${MemberChannel});
+					};
+
+					if('${type}'=='1' || '${type}'=='3') {
+						MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+                                        	query_exit="UPDATE pbx_campaign_agent SET is_logged = 1, pbx_peer_id = '${CALLERID(num)}' WHERE pbx_campaign_agent_id = '${ca_id}'";
+                                        	MYSQL(Query queryid ${connid} ${query_exit});
+                                        };
+
+                                        if('${type}'=='3') {
+                                                MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+                                                query_exit="UPDATE pbx_campaign_agent SET is_logged = 1, pbx_peer_id = '${CALLERID(num)}' WHERE pbx_campaign_agent_id = '${ca_id}'";
+                                                MYSQL(Query queryid ${connid} ${query_exit});
+
+                                                Set(MemberChannel=${CHANNEL(channeltype)}/${CHANNEL(peername)});
+                                                AddQueueMember(${EXTEN:4},${MemberChannel});
+
+                                        };
+
+
+                                        MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+                                        query_exit="UPDATE pbx_campaign_agent SET is_logged = 1, pbx_peer_id = '${CALLERID(num)}' WHERE pbx_campaign_agent_id = '${ca_id}'";
+                                        MYSQL(Query queryid ${connid} ${query_exit});
+				
+ 					query_log="INSERT INTO pbx_agent_log SET event = 1, pbx_locker_id = '${login}', pbx_peer_id = '${CALLERID(num)}', pbx_campaign_id = '${campaign_id}'";
+	                                MYSQL(Query queryid ${connid} ${query_log});
+
+					Playback(agent-loginok);
+                			Hangup();
+                                };
+                        } else {
+			       	playback(access-denied);
+                        	Hangup();
+			};
+                } else { 
+			playback(access-denied);
+			Hangup();
+		};
+        };
+
+
+
+	//CHANNEL MONITOR(SPY)
+	_*103X. => {
+                Verbose(2,[${CHANNEL}] - CHANNEL MONITOR FROM ${CDR(accountcode)} ON ${EXTEN:4} ##);
+                
+		Set(CDR(location)=Monitorar Chamada);
+		Set(CDR(trunkname)=Interno);
+		Playback(spy-agent);
+		ChanSpy(SIP/${EXTEN:4});
+		Hangup();
+	};
+
+
+	*43 => {
+		Playback(demo-echotest);
+		Hangup();
+	};
+
+        _7XXX => {
+       		Set(CDR(location)=Fila);
+	        Set(CDR(campaign)=${EXTEN});
+                Queue(${EXTEN});
+                Hangup();
+        }
+
+
+	_*555. => {
+		goto incoming|${EXTEN:4}|1;	
+	
+	};
+
+	
+        h =>    {
+        	//Verbose(2,[${CHANNEL}] - SETTING CDR AND BILLING ##);
+
+                //Verbose(2,[${CHANNEL}] - ${SHELL(echo -n \\033\[0\;34m)}STATUS ${DIALSTATUS}${SHELL(echo -n \\033\[0\;37m)});
+		if('${CDR(rate)}' > '0') {
+			&set_call_cost(${CDR(billsec)},${CDR(rate)},${CDR(accountcode)});
+        		set(CDR(cost)=${GOSUB_RETVAL});
+                };
+		set(CDR(hangupcause)=${HANGUPCAUSE});
+                set(CDR(llp)=${CHANNEL(rtpqos,audio,local_normdevrxploss)});
+                set(CDR(rlp)=${CHANNEL(rtpqos,audio,remote_normdevrxploss)});
+                set(CDR(txcount)=${CHANNEL(rtpqos,audio,rxcount)});
+                set(CDR(rxcount)=${CHANNEL(rtpqos,audio,txcount)});
+                set(CDR(codec1)=${CHANNEL(audioreadformat)});
+                set(CDR(codec2)=${CHANNEL(audiowriteformat)});
+
+                Verbose(2,-- );
+                Verbose(2,[${CHANNEL}] - ${SHELL(echo -n \\033\[0\;32m)}CHAMADA FINALIZADA - ${SHELL(echo -n \\033\[0\;35m)}VALOR: R$ ${CDR(cost)} DURAÇÃO: ${CDR(billsec)}s.${SHELL(echo -n \\033\[0\;32m)} ${SHELL(echo -n \\033\[0\;37m)}${SHELL(echo -n \\033\[0\;34m)}- STATUS ${DIALSTATUS}${SHELL(echo -n \\033\[0\;37m)} );
+		Verbose(2,[${CHANNEL}] - hangupcause=${HANGUPCAUSE}, llp=${CHANNEL(rtpqos,audio,local_normdevrxploss)}, rlp=${CHANNEL(rtpqos,audio,remote_normdevrxploss)}, txcount=${CHANNEL(rtpqos,audio,rxcount)}, rxcount=${CHANNEL(rtpqos,audio,txcount)}, codec1=${CHANNEL(audioreadformat)}, codec2=${CHANNEL(audiowriteformat)});
+	};
+
+};
+
+context incoming {
+        _7XXX => {
+                Set(CDR(campaign)=${EXTEN});
+		Set(CDR(location)='Fila');
+                Queue(${EXTEN});
+                Hangup();
+        }
+
+	_[2-4]XXX => {
+		Verbose(2,-- );
+                Verbose(2,[${CHANNEL}] - ${SHELL(echo -n \\033\[0\;33m)}CHAMADA ENTRANTE: de ${CALLERID(all)} para ${EXTEN} ##${SHELL(echo -n \\033\[0\;37m)});
+                Verbose(2,-- );
+		&follow_me(${CALLERID(num)}, ${EXTEN});
+		Dial(SIP/${EXTEN},45,tTkK);
+                Voicemail(${EXTEN}@global);
+                Hangup();
+	};
+
+	_[0-9a-zA-Z]. => {
+
+		MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+                query_route="SELECT count(pbx_route_incoming_id), description, dest_exten, pbx_campaign_id FROM pbx_route_incoming WHERE trunk_name = '${EXTEN}' LIMIT 1";
+
+                MYSQL(Query queryid ${connid} ${query_route});
+                MYSQL(Fetch resultid ${queryid} has_route description dest campaign_id);
+                MYSQL(Clear ${queryid});
+                MYSQL(Disconnect ${connid});
+
+                if('${has_route}'=='0') {
+                	Playback(no-route-exists-to-dest);
+	                Hangup();
+		};
+
+		SET(CDR(campaign)=${campaign_id});
+		&dial_incoming(${CALLERID(num)}, ${dest}, ${EXTEN});
+		Hangup();
+	};
+};
+
+
+context ivr {
+
+	_1XXX => {
+		SET(CDR(ivr)=${EXTEN});
+		goto s|1;				
+
+	};
+
+	_7XXX => {
+		Set(CDR(location)='Fila');
+		Set(CDR(campaign)=${EXTEN});
+		Queue(${EXTEN});
+		Hangup();	
+	}
+	
+        t => {
+		NoOP(Timeout);
+		MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+                query_t="SELECT exten_t FROM pbx_ivr WHERE pbx_ivr_id = '${CDR(ivr)}' LIMIT 1";
+
+                MYSQL(Query queryid ${connid} ${query_t});
+                MYSQL(Fetch resultid ${queryid} dest);
+                MYSQL(Clear ${queryid});
+                MYSQL(Disconnect ${connid});
+
+                if('${dest}'!='') {
+			&dial_incoming(${CALLERID(num)}, ${dest}, 0);
+		};
+		
+		Playback(timeout);
+		Hangup();
+
+        };
+
+	s => {
+		
+  		MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+                query_d="SELECT count(pbx_ivr_id) FROM pbx_ivr WHERE pbx_ivr_id = '${CDR(ivr)}' LIMIT 1";
+
+                MYSQL(Query queryid ${connid} ${query_d});
+                MYSQL(Fetch resultid ${queryid} dest);
+                MYSQL(Clear ${queryid});
+                MYSQL(Disconnect ${connid});
+
+                if('${dest}'>'0') {
+
+			NoOP(Start);
+			Background(ivr-${CDR(ivr)});
+			WaitExten(10);
+		};
+		Hangup();
+	};
+
+        i => {
+                NoOP(Invalid);
+		Playback(invalid);
+		goto s|1;
+        };
+
+	_[0-9] => {
+		NoOP(Exten ${EXTEN});
+
+                MYSQL(Connect connid ${MYSQL-SERVER} ${MYSQL-USER} ${MYSQL-PASSWORD} ${MYSQL-DB});
+
+                query_d="SELECT exten_${EXTEN} FROM pbx_ivr WHERE pbx_ivr_id = '${CDR(ivr)}' LIMIT 1";
+
+                MYSQL(Query queryid ${connid} ${query_d});
+                MYSQL(Fetch resultid ${queryid} dest);
+                MYSQL(Clear ${queryid});
+                MYSQL(Disconnect ${connid});
+
+                if('${dest}'!='') {
+                        &dial_incoming(${CALLERID(num)}, ${dest}, 0);
+                } else {
+			playback(invalid);
+			goto s|1;
+		};
+
+                Hangup();
+	};
+
+}
+

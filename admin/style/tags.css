@@ -1,0 +1,24 @@
+h2 {
+	font-size: 18px;
+	margin-bottom: 10px;
+}
+
+span.menu_title {
+    font-size: 18px;
+    color: #555555;
+}
+
+img {
+    border: none;
+}
+
+a.menu_item {
+    font-size: 14px; 
+    text-decoration: none; 
+    color: #FFFFFF;
+}
+
+a.menu_item:hover {
+    color: black;
+}
+
